@@ -111,9 +111,24 @@ except ModuleNotFoundError as e:
             print(f"  inner quantumgraph package present:      "
                   f"{'yes' if os.path.isdir(inner) else 'NO -- unzipped one level too deep?'}")
         print("\n  Expected layout:")
-        print("    <somewhere>/quantum_faction_server_v7.py")
+        print("    <somewhere>/eigenstate_server.py")
         print("    <somewhere>/QuantumGraph/quantumgraph/__init__.py\n")
-    sys.exit(1)
+
+    # DO NOT sys.exit HERE. On a terminal that prints the diagnostic above
+    # and stops, which is what you want. On a serverless host it kills the
+    # worker during module import and the platform reports only
+    # FUNCTION_INVOCATION_FAILED with no cause -- the diagnostic is written
+    # to a stdout nobody reads. Raising puts the same text in the traceback,
+    # which does reach the log.
+    raise ImportError(
+        f"eigenstate: could not import {missing}. "
+        f"Looked for the vendored libraries in {_HERE}: "
+        + ", ".join(f"{c}={'yes' if os.path.isdir(os.path.join(_HERE, c)) else 'MISSING'}"
+                    for c in _SEARCH)
+        + ". If they are all MISSING in a deployed build, they were not "
+        "included in the bundle -- most often because each one is its own "
+        "git clone and git recorded it as an empty submodule."
+    )
 
 from qiskit import transpile
 from qiskit.circuit import ClassicalRegister
