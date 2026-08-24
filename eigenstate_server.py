@@ -195,6 +195,40 @@ def _no_route(e):
     }), 404
 
 
+CLIENT_KEY = (os.environ.get("EIGENSTATE_CLIENT_KEY") or "").strip()
+
+# Endpoints anyone may call. /health has to stay open so a launcher or a
+# monitor can ask "are you up?", and the root is a description of the service.
+_OPEN_PATHS = ("/health", "/")
+
+
+@app.before_request
+def _gate():
+    """A shared secret, but only when one is configured.
+
+    THE THREAT THIS ADDRESSES, precisely: once Moth credentials are set on a
+    public deployment, the URL is a way to spend Moth's quantum credits, and
+    URLs get found. This stops drive-by use by anyone who stumbles on it.
+
+    It is NOT real authentication and should not be described as such. The key
+    ships inside the game, so anyone willing to open the binary can read it.
+    That is a different threat model and not one worth solving for a demo --
+    the point is that a stranger with the URL cannot drain the budget, not
+    that a determined person cannot.
+
+    Unset means no check at all, so local development and the current
+    credential-free deployment are unaffected.
+    """
+    if not CLIENT_KEY:
+        return None
+    if request.method == "OPTIONS" or request.path in _OPEN_PATHS:
+        return None
+    if request.headers.get("X-Eigenstate-Key") == CLIENT_KEY:
+        return None
+    return jsonify({"error": "not authorised",
+                    "detail": "this deployment requires X-Eigenstate-Key"}), 401
+
+
 @app.errorhandler(Exception)
 def _blew_up(e):
     """Hand the caller the traceback instead of Werkzeug's beige 500 page.
@@ -251,7 +285,7 @@ def _cors(resp):
     """
     resp.headers["Access-Control-Allow-Origin"]  = os.environ.get(
         "EIGENSTATE_CORS_ORIGIN", "*")
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Eigenstate-Key"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Max-Age"]       = "86400"
     return resp

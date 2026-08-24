@@ -417,6 +417,33 @@ check("and carries no tomography",
 S.graph_engine, S.hw_enabled, S.hw_scope = _real_engine, _real_hw, _real_scope
 
 
+print("\n=== 13. the shared-secret gate ===")
+# Unset: everything open, which is local development and the current
+# credential-free deployment.
+S.CLIENT_KEY = ""
+st, _ = post("/newgame", {})
+check("no key configured means no check", st == 200, st)
+
+S.CLIENT_KEY = "s3cret"
+st, _ = post("/newgame", {})
+check("wrong/absent key is refused", st == 401, st)
+
+r = app.get("/health")
+check("/health stays open for monitoring", r.status_code == 200, r.status_code)
+r = app.get("/")
+check("the root stays open too", r.status_code == 200, r.status_code)
+
+r = app.options("/turn")
+check("preflight is not gated", r.status_code < 400, r.status_code)
+check("and CORS advertises the header",
+      "X-Eigenstate-Key" in (r.headers.get("Access-Control-Allow-Headers") or ""),
+      r.headers.get("Access-Control-Allow-Headers"))
+
+r = app.post("/newgame", json={}, headers={"X-Eigenstate-Key": "s3cret"})
+check("the right key gets through", r.status_code == 200, r.status_code)
+S.CLIENT_KEY = ""
+
+
 print(f"\n{'='*54}\n  {len(OK)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  failing:", ", ".join(FAIL))
