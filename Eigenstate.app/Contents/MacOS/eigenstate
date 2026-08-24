@@ -1,0 +1,73 @@
+#!/bin/bash
+# Eigenstate launcher.
+#
+# THIS is the thing the player double-clicks. It is a real .app bundle, so
+# in Finder and the Dock it behaves like any other application: no Terminal
+# window, no shell script sitting in a folder, no instructions. LSUIElement
+# in Info.plist keeps it out of the Dock entirely, so the only window that
+# ever appears is the game's.
+#
+# It exists because GameMaker's LTS2026 macOS runner has neither
+# execute_shell nor execute_program, so the game cannot start the server
+# itself. Inverting the dependency needs nothing from GML and cannot be
+# taken away by a runtime update.
+#
+# Layout it expects:
+#
+#   Eigenstate/                     <- ship this whole folder
+#     Eigenstate.app                <- this bundle. the player clicks it
+#     Eigenstate Game.app           <- the actual GameMaker export
+#     eigenstate_server.py
+#     start_server.sh
+#     stop_server.sh
+#     setup.sh
+#     MothQuantumGraph/  QuantumGraph/  pairwise-tomography/
+#     venv/                         <- built once by setup.sh
+
+set -u
+
+# Contents/MacOS/eigenstate -> up three levels is the folder we sit in
+HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$HERE" || exit 1
+
+LOG="$HERE/launcher.log"
+say() { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
+
+say "=== launcher start, cwd $HERE ==="
+
+# ---- 1. the brain ----------------------------------------------------
+# --nowait returns in well under a second. The server keeps importing
+# qiskit in the background while the game's splash and intro letter play,
+# and the game's own retry loop waits for it. Nobody watches a port.
+if [ -x "./start_server.sh" ]; then
+    ./start_server.sh --nowait
+    say "start_server.sh returned $?"
+else
+    say "FATAL: no start_server.sh next to the bundle"
+    osascript -e 'display alert "Eigenstate" message "The server files are missing. Keep Eigenstate.app in the folder it shipped in."' 2>/dev/null
+    exit 1
+fi
+
+# ---- 2. the game -----------------------------------------------------
+GAME=""
+for cand in "./Eigenstate Game.app" "./EigenstateGame.app" "./Game.app"; do
+    if [ -d "$cand" ]; then GAME="$cand"; break; fi
+done
+
+if [ -z "$GAME" ]; then
+    say "no game bundle found next to the launcher"
+    osascript -e 'display alert "Eigenstate" message "The game itself is missing. Expected Eigenstate Game.app next to this launcher."' 2>/dev/null
+    exit 1
+fi
+
+say "launching $GAME"
+open -W "$GAME"          # -W: block until the game quits
+say "game exited"
+
+# ---- 3. tidy up ------------------------------------------------------
+# The game cannot call stop_server.sh either, for the same reason it cannot
+# start it. So the launcher owns the whole lifetime: it started the server,
+# it waited for the game, and now it stops the server. No orphan on 5055,
+# which was the single most confusing failure mode during development.
+[ -x "./stop_server.sh" ] && ./stop_server.sh >> "$LOG" 2>&1
+say "=== launcher done ==="

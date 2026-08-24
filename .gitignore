@@ -1,0 +1,15 @@
+moth.env
+server.log
+.server.pid
+__pycache__/
+*.pyc
+.eigenstate/
+moth.env
+venv/
+__pycache__/
+*.pyc
+server.log
+launch.log
+launcher.log
+.server.pid
+*.tar.gz

@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.server.pid
+server.log
+launch.log
+launcher.log
+Eigenstate.app/
+*.tar.gz
+tools/
+moth.env
