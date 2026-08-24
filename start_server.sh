@@ -60,8 +60,16 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-# Credentials and mode, if present. Never printed.
-[ -f moth.env ] && . ./moth.env
+# Sourced so it does NOT clobber anything already set in the environment,
+# because `EIGENSTATE_HW_SCOPE=world ./start_server.sh` silently losing to a
+# stale line in this file is a bad twenty minutes.
+if [ -f moth.env ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in ''|\#*) continue ;; esac
+        eval "cur=\${$k:-}"
+        [ -z "$cur" ] && export "$k=$v"
+    done < moth.env
+fi
 
 say "starting $SERVER with $PY"
 nohup "$PY" "$SERVER" > "$LOG" 2>&1 &

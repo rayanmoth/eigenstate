@@ -284,7 +284,7 @@ def _default_scope():
     demo to be able to set without editing code.
     """
     want = (os.environ.get("EIGENSTATE_HW_SCOPE") or "").strip()
-    return want if want in ("oaths", "off") else "oaths"
+    return want if want in ("oaths", "off", "world") else "oaths"
 
 
 hw_scope   = _default_scope()
@@ -321,11 +321,30 @@ def hw_budget_report():
 def want_hardware(kind):
     """Should THIS measurement go to the engine?
 
-    Only oaths. A battle is composed rotations and this engine takes state
-    targets, so there is nothing honest to send it; initiative is asked every
-    month and a 3-10s round trip per turn is not a game. Both stay local.
+    Three scopes now:
+
+      off     nothing leaves the machine.
+      oaths   the deferred oath measurement only. One round trip a month at
+              most, and only in months where something matures.
+      world   oaths, PLUS one read of the whole world per month, whose
+              tomography becomes the numbers the player is shown. Every bond,
+              mood and leverage figure on screen then came off the engine
+              rather than off the local simulation.
+
+    Still never: battles and initiative. A battle is composed rotations at
+    specific angles where the ORDER is the mechanic, and this engine takes
+    state targets. "Rotate q2 by 0.4 about Y then -0.3 about X" is not
+    expressible as "set the ZZ correlation to 0.6", so sending it would be a
+    lie about what was computed. Initiative is asked every single month and a
+    round trip per turn is not a game.
     """
-    return bool(hw_enabled and hw_scope == "oaths" and kind == "oath")
+    if not hw_enabled:
+        return False
+    if kind == "oath":
+        return hw_scope in ("oaths", "world")
+    if kind == "world":
+        return hw_scope == "world"
+    return False
 
 
 def run_counts(circ, shots, hardware=False, kind=""):
@@ -694,6 +713,11 @@ def world_export():
         "known":     copy.deepcopy(known),
         "last_seen": list(last_seen),
         "gate_log":  list(gate_log),
+        # THE ENGINE'S READ OF THE WORLD, if there was one. Travels with the
+        # world so /scout and /observe report the same numbers the last /turn
+        # measured, instead of quietly falling back to the local simulation
+        # and showing figures that disagree by a few percent.
+        "tomo":      engine_view.as_dict() if engine_view is not None else None,
         "v": 1,
     }
 
@@ -711,6 +735,56 @@ def _grid(src, name):
             raise ValueError(f"world.{name} must be a {N}x{N} array")
         out.append([max(-1.0, min(1.0, float(x))) for x in row])
     return out
+
+
+WORLD_SHOTS = int(os.environ.get("EIGENSTATE_WORLD_SHOTS", "256"))
+
+
+def sync_world_from_engine():
+    """Send the whole world to Moth's engine and read the state back.
+
+    This is what makes "every kingdom is a qubit on the engine" literally
+    true rather than nearly true. world_ops() already serialises the entire
+    world -- every mood as a Bloch vector, every bond as a signed ZZ,
+    leverage as ZX/XZ, debt as XY/YX, with open oaths folded in -- and it
+    builds that purely from the intent tables, never from the local graph.
+    The engine returns full tomography. So the only thing that was ever
+    missing was reading the answer back instead of reading the simulation.
+
+    ONE CALL PER MONTH, deliberately. The round trip is seconds, and doing
+    this per readout would put a turn well past what anyone will sit through.
+    Called where rebuild() already runs, so the local graph stays available
+    for the things that genuinely cannot travel: battle odds and the deciding
+    shot, which are composed rotations rather than state targets.
+
+    NEVER FATAL. If the engine is slow, rate-limited, or down, the local
+    simulation is a correct fallback and the month continues. A network hiccup
+    must not cost the player their turn, so every failure path here ends in
+    "carry on locally" plus a line in the gate log saying so.
+    """
+    global engine_view
+
+    if not want_hardware("world"):
+        engine_view = None
+        return None
+
+    try:
+        meta = graph_engine().measure(world_ops(), N, shots=WORLD_SHOTS)
+    except Exception as e:
+        engine_view = None
+        log_gate(f"world read fell back to local ({type(e).__name__})")
+        return None
+
+    v = EngineView(meta.get("tomography"))
+    if not v.ok():
+        engine_view = None
+        log_gate("world read fell back to local (engine sent no tomography)")
+        return None
+
+    engine_view = v
+    log_gate(f"world measured on {graph_engine().where(meta)} "
+             f"in {meta.get('wall_s')}s -- every number below is from there")
+    return meta
 
 
 def _commit_clean(c):
@@ -782,6 +856,7 @@ def world_import(d):
     a hash rather than two tomography passes."""
     global current_year, mood, bond, lev, deb
     global pending, next_uid, known, last_seen, gate_log, qg, _qg_key
+    global engine_view
 
     if not isinstance(d, dict):
         return False
@@ -821,6 +896,14 @@ def world_import(d):
     pending, next_uid = _pending, _next_uid
     known, last_seen, gate_log = _known, _last_seen, _gate_log
     current_year = _year
+
+    # Restore the engine's view if this world carries one, and CLEAR it
+    # otherwise. Clearing is the load-bearing half: engine_view is module
+    # state, so without this a view built for one player's world would be
+    # used to answer the next request, whoever it belongs to.
+    _t = d.get("tomo")
+    _v = EngineView(_t) if isinstance(_t, dict) else None
+    engine_view = _v if (_v is not None and _v.ok()) else None
 
     key = _world_key()
     if qg is None or _qg_key != key:
@@ -936,26 +1019,81 @@ def set_leverage(a, b, amount, why):
 
 
 # ----------------------------------------------------------------------
+PAULIS = ("XX", "XY", "XZ", "YX", "YY", "YZ", "ZX", "ZY", "ZZ")
+
+
+class EngineView:
+    """Read the world out of graph-v1's tomography instead of the local sim.
+
+    graph-v1 hands back exactly the two things the game reads -- a Bloch
+    vector per qubit and nine Paulis per pair -- so this exposes the same two
+    methods QuantumGraph does and every caller downstream is unchanged.
+
+        "tomography": {
+          "bloch":         {"0": {"X":..,"Y":..,"Z":..}, ...},
+          "relationships": {"0,1": {"XX":..,"XY":.., ... ,"ZZ":..}, ...}
+        }
+
+    Keys arrive as STRINGS, and pairs as "a,b" ascending. Every caller in this
+    file already normalises to (min, max) and handles direction itself, so no
+    transpose is needed here -- and it must not be added, because getting the
+    ZX/XZ order wrong would silently invert which kingdom holds leverage over
+    which.
+    """
+
+    def __init__(self, tomo):
+        self.bloch = (tomo or {}).get("bloch") or {}
+        self.rel = (tomo or {}).get("relationships") or {}
+
+    def ok(self):
+        return bool(self.bloch)
+
+    def get_bloch(self, i):
+        d = self.bloch.get(str(int(i))) or {}
+        return {k: float(d.get(k, 0.0)) for k in ("X", "Y", "Z")}
+
+    def get_relationship(self, a, b):
+        d = self.rel.get(f"{int(a)},{int(b)}") or {}
+        return {p: float(d.get(p, 0.0)) for p in PAULIS}
+
+    def as_dict(self):
+        return {"bloch": self.bloch, "relationships": self.rel}
+
+
+engine_view = None      # set by sync_world_from_engine, travels in the world
+
+
+def view():
+    """Where the game reads the world FROM.
+
+    The engine's tomography when we have it, the local graph otherwise. This
+    is a function rather than a variable because rebuild() reassigns qg, and a
+    cached reference would go stale and silently serve last month's world.
+    """
+    return engine_view if engine_view is not None else qg
+
+
 def connected(a, b, key="ZZ"):
     """<AB> - <A><B>: zero for kingdoms that merely happen to share a mood,
     non-zero only where there is a real correlation."""
-    r = qg.get_relationship(min(a, b), max(a, b))
-    ba = qg.get_bloch(a)
-    bb = qg.get_bloch(b)
+    _v = view()
+    r = _v.get_relationship(min(a, b), max(a, b))
+    ba = _v.get_bloch(a)
+    bb = _v.get_bloch(b)
     raw = r[key]
     return max(-1.0, min(1.0, (raw - ba[key[0]] * bb[key[1]]) * 1.35))
 
 
 def leverage_read(a, b):
     """Who has the upper hand. Positive: a sways b more than b sways a."""
-    r = qg.get_relationship(min(a, b), max(a, b))
+    r = view().get_relationship(min(a, b), max(a, b))
     v = r["ZX"] - r["XZ"]
     return max(-1.0, min(1.0, v if a < b else -v))
 
 
 def debt_read(a, b):
     """The second channel. Positive: b owes a."""
-    r = qg.get_relationship(min(a, b), max(a, b))
+    r = view().get_relationship(min(a, b), max(a, b))
     v = r["XY"] - r["YX"]
     return max(-1.0, min(1.0, v if a < b else -v))
 
@@ -985,7 +1123,7 @@ def read_state():
     out = []
     eff = effective_bonds()
     for i in range(N):
-        bl = qg.get_bloch(i)
+        bl = view().get_bloch(i)
         r = math.sqrt(bl["X"] ** 2 + bl["Y"] ** 2 + bl["Z"] ** 2)
         # v8: intel actually goes stale. `hostility` stays live because the
         # rival AI runs on the client and has to think with real numbers;
@@ -1463,6 +1601,7 @@ def newgame():
             for i in range(N):
                 traits[i] += bits[i]
 
+        sync_world_from_engine()
         factions, pairs = read_state()
         for i in range(N):
             last_seen[i] = 1          # you begin the game briefed
@@ -1532,6 +1671,10 @@ def turn():
 
         diluted = enforce_monogamy()
         rebuild()
+        # ONE engine read of the whole world, if the scope allows it. Must sit
+        # AFTER rebuild and BEFORE read_state, or the numbers reported are not
+        # the ones just measured.
+        sync_world_from_engine()
         world_seal()
 
         factions, pairs = read_state()
@@ -1659,7 +1802,7 @@ def observe():
         tomo = []
         for a in range(N):
             for b in range(a + 1, N):
-                r = qg.get_relationship(a, b)
+                r = view().get_relationship(a, b)
                 tomo.append({"a": a, "b": b,
                              "paulis": {k: round(v, 3) for k, v in r.items()}})
         world_seal()

@@ -329,6 +329,88 @@ st, r7 = post("/turn", {"world": {**w, "pending": [
 check("out-of-range kingdom in an oath gives 400", st == 400, st)
 
 
+print("\n=== 12. scope=world reads the kingdoms off the engine ===")
+# A fake engine, so this runs with no credentials and no network. It returns
+# tomography with values nothing local would ever produce, which is how the
+# test proves the numbers on screen came from the engine rather than from the
+# local simulation agreeing by coincidence.
+MARK_X, MARK_Z, MARK_ZZ = 0.111, -0.222, 0.777
+calls = {"n": 0}
+
+
+class _FakeEngine:
+    engine = "graph-v1"
+
+    def measure(self, operations, n, shots=1, coupling_map=None, mode_=None):
+        calls["n"] += 1
+        return {
+            "tomography": {
+                "bloch": {str(i): {"X": MARK_X, "Y": 0.0, "Z": MARK_Z}
+                          for i in range(n)},
+                "relationships": {
+                    f"{a},{b}": {p: (MARK_ZZ if p == "ZZ" else 0.0)
+                                 for p in S.PAULIS}
+                    for a in range(n) for b in range(a + 1, n)},
+            },
+            "mode": "emu", "wall_s": 1.2, "engine": "graph-v1",
+        }
+
+    def where(self, meta):
+        return "moth/graph-v1 (emu)"
+
+
+_real_engine, _real_hw, _real_scope = S.graph_engine, S.hw_enabled, S.hw_scope
+S.graph_engine = lambda: _FakeEngine()
+S.hw_enabled = True
+S.hw_scope = "world"
+
+calls["n"] = 0
+st, ng = post("/newgame", {})
+check("/newgame with scope=world 200", st == 200, st)
+check("the engine was called exactly once", calls["n"] == 1, calls["n"])
+
+_f1 = ng["factions"][1]
+# hostility is -Z / MOOD_CEILING, so our marker Z must show up in it
+_expect = round(max(-1.0, min(1.0, -MARK_Z / S.MOOD_CEILING)), 3)
+check("hostility came from the engine's Bloch vector",
+      _f1["hostility"] == _expect, f"{_f1['hostility']} vs {_expect}")
+check("the engine's tomography travels in the world",
+      (ng["world"].get("tomo") or {}).get("bloch") is not None)
+
+# and the round trip: /scout does NOT call the engine, but must still report
+# the engine's numbers rather than silently reverting to the local sim
+calls["n"] = 0
+st, sc = post("/scout", {"world": ng["world"], "year": 1, "target": 2})
+check("/scout does not spend a round trip", calls["n"] == 0, calls["n"])
+check("/scout still reports the engine's numbers",
+      sc["factions"][1]["hostility"] == _expect,
+      sc["factions"][1]["hostility"])
+
+# a failing engine must not cost the player their turn
+class _BrokenEngine(_FakeEngine):
+    def measure(self, *a, **k):
+        raise TimeoutError("engine is having a day")
+
+
+S.graph_engine = lambda: _BrokenEngine()
+st, br = post("/turn", {"world": ng["world"], "year": 2, "events": []})
+check("a dead engine falls back to local instead of 500ing", st == 200, st)
+check("and says so in the gate log",
+      any("fell back to local" in g for g in br["world"]["gate_log"]),
+      br["world"]["gate_log"][-3:])
+
+# scope=oaths must NOT read the world from the engine
+S.graph_engine = lambda: _FakeEngine()
+S.hw_scope = "oaths"
+calls["n"] = 0
+st, oa = post("/newgame", {})
+check("scope=oaths leaves the world local", calls["n"] == 0, calls["n"])
+check("and carries no tomography",
+      (oa["world"].get("tomo") is None), oa["world"].get("tomo"))
+
+S.graph_engine, S.hw_enabled, S.hw_scope = _real_engine, _real_hw, _real_scope
+
+
 print(f"\n{'='*54}\n  {len(OK)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  failing:", ", ".join(FAIL))
