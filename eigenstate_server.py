@@ -145,6 +145,31 @@ app = Flask(__name__)
 lock = threading.Lock()
 
 
+@app.errorhandler(404)
+def _no_route(e):
+    """Say WHICH path we were handed, and what we would have accepted.
+
+    A platform rewrite that hands Flask the wrong path produces a 404 on
+    every endpoint, which is indistinguishable from a code bug if all you
+    get is Werkzeug's default page. This makes the difference visible in one
+    request: if `path` below is not the path you asked for, it is routing,
+    not code.
+    """
+    return jsonify({
+        "error": "no such route",
+        "path": request.path,
+        "full_path": request.full_path,
+        "script_root": request.script_root,
+        "url": request.url,
+        "method": request.method,
+        "query": dict(request.args),
+        "known_routes": sorted(
+            r.rule for r in app.url_map.iter_rules()
+            if not r.rule.startswith("/static")),
+        "version": "clean-3",
+    }), 404
+
+
 @app.errorhandler(ValueError)
 def _bad_world(e):
     """A malformed world blob is the client's fault, not ours. 400 with the
