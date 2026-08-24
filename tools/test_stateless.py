@@ -101,8 +101,32 @@ def check(name, cond, detail=""):
           + (("   " + str(detail)) if detail and not cond else ""))
 
 
+def gm(o):
+    """Mangle a payload the way GameMaker does.
+
+    GML has no integer type -- every number is a double -- so json_stringify
+    writes 2 as 2.0 and Python's json.loads hands it back as a float. That
+    is exactly how the "list indices must be integers" crash reached
+    effective_bonds: the server stored {"a": 2}, the client returned
+    {"a": 2.0}, and nothing in between objected.
+    
+    Applied to EVERY request below, so the whole suite runs under the same
+    conditions the real client creates rather than the friendlier ones a
+    Python test naturally produces.
+    """
+    if isinstance(o, bool):
+        return o
+    if isinstance(o, int):
+        return float(o)
+    if isinstance(o, list):
+        return [gm(v) for v in o]
+    if isinstance(o, dict):
+        return {k: gm(v) for k, v in o.items()}
+    return o
+
+
 def post(path, body):
-    r = app.post(path, json=body)
+    r = app.post(path, json=json.loads(json.dumps(gm(body))))
     return r.status_code, (r.get_json() or {})
 
 
@@ -256,6 +280,53 @@ check("hw_jobs_used survived a client world", S.hw_jobs_used == 9,
       S.hw_jobs_used)
 check("hw counters are not in the world blob",
       "hw_jobs_used" not in w0 and "hw_shots_used" not in w0)
+
+
+print("\n=== 11. REGRESSION: floats where ints belong ===")
+# The crash that took production down: an open oath round-tripped through
+# GameMaker arrives with a=2.0 instead of a=2, and effective_bonds indexes
+# a list with it. Month 1 was fine because nothing was on the board yet.
+st, r1 = post("/newgame", {})
+w = r1["world"]
+st, r2 = post("/turn", {"world": w, "year": 2, "events": [],
+                        "commitments": [{"kind": "pact", "a": 0, "b": 2,
+                                         "axis": "Y", "strength": 0.7,
+                                         "span": 3, "owner": 0}]})
+check("oath opened", st == 200 and len(r2["world"]["pending"]) == 1, st)
+
+# now the second turn, carrying that oath back -- this is the request that
+# used to 500
+st, r3 = post("/turn", {"world": r2["world"], "year": 3, "events": []})
+check("a turn carrying an open oath survives", st == 200, r3)
+
+# and /resolve, which is where it actually blew up in the game
+st, r4 = post("/resolve", {"world": r2["world"], "year": 3,
+                           "questions": [{"kind": "initiative"}]})
+check("/resolve carrying an open oath survives", st == 200, r4)
+
+# the commitment's indices must be ints on the way back out, or the next
+# round trip is just as broken
+if st == 200 and len(r2["world"]["pending"]) == 1:
+    _c = r2["world"]["pending"][0]
+    check("a/b/owner survive as whole numbers",
+          _c["a"] == int(_c["a"]) and _c["b"] == int(_c["b"])
+          and _c["owner"] == int(_c["owner"]), _c)
+
+# a pressure entry carries `on`, used directly as a qubit index
+st, r5 = post("/turn", {"world": r2["world"], "year": 3, "events": [],
+                        "pressures": [{"uid": r2["world"]["pending"][0]["uid"],
+                                       "by": 1, "axis": "Y",
+                                       "amount": 0.4, "on": 2}]})
+check("pressure with a float qubit index survives", st == 200, r5)
+st, r6 = post("/turn", {"world": r5.get("world", w), "year": 4, "events": []})
+check("and the turn after it", st == 200, r6)
+
+# a garbage kingdom index must be refused, not indexed with
+st, r7 = post("/turn", {"world": {**w, "pending": [
+    {"uid": 1, "kind": "pact", "a": 0, "b": 99, "axis": "Y",
+     "strength": 0.5, "sworn": 1, "matures": 4, "owner": 0}]},
+    "year": 2})
+check("out-of-range kingdom in an oath gives 400", st == 400, st)
 
 
 print(f"\n{'='*54}\n  {len(OK)} passed, {len(FAIL)} failed")

@@ -64,7 +64,7 @@ raw ZZ = -0.59 where the product alone was -0.56, leaving a true
 correlation of -0.03. Everything below reports connected values.
 """
 
-import sys, os, math, threading, time, json, copy
+import sys, os, math, threading, time, json, copy, traceback
 from flask import Flask, request, jsonify
 
 # QuantumGraph is not on PyPI, so it ships in a folder next to this file.
@@ -193,6 +193,41 @@ def _no_route(e):
             if not r.rule.startswith("/static")),
         "version": "clean-3",
     }), 404
+
+
+@app.errorhandler(Exception)
+def _blew_up(e):
+    """Hand the caller the traceback instead of Werkzeug's beige 500 page.
+
+    Chasing a 500 across a hosted server by guessing is miserable and slow:
+    the client sees "Internal Server Error", the platform's log is a
+    separate tab, and the loop between a hypothesis and a test is minutes
+    long. This makes the failing line visible in the response the client
+    already prints, which collapses that loop to one run.
+
+    It also prints to stdout, so it lands in the platform log even when
+    nobody is looking at the client.
+
+    HTTPException subclasses are re-raised: 404 and the like have their own
+    handlers and are not crashes.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+
+    tb = traceback.format_exc()
+    print("=== UNHANDLED ===\n" + tb, flush=True)
+
+    if os.environ.get("EIGENSTATE_TRACEBACKS", "1") != "1":
+        return jsonify({"error": "internal error"}), 500
+
+    return jsonify({
+        "error": type(e).__name__,
+        "detail": str(e),
+        "where": request.path,
+        "traceback": tb.splitlines()[-14:],
+        "version": "clean-3",
+    }), 500
 
 
 @app.errorhandler(ValueError)
@@ -678,6 +713,66 @@ def _grid(src, name):
     return out
 
 
+def _commit_clean(c):
+    """Coerce one commitment out of untrusted JSON.
+
+    THE BUG THIS EXISTS FOR. GameMaker has no integer type -- every number
+    is a double -- so a commitment stored here as {"a": 2} comes back from
+    the client as {"a": 2.0}. Python carries that happily until something
+    does eff[a][b] with it, and then you get "list indices must be integers
+    or slices, not float" raised from effective_bonds, four calls away from
+    the actual mistake.
+
+    The bond grids were validated on import; the commitments were not, so
+    the first month with an open oath on the board took the server down. Any
+    number here that ends up indexing a list or a qubit has to be an int at
+    the boundary, not wherever it happens to be used.
+    """
+    if not isinstance(c, dict) or "uid" not in c:
+        raise ValueError("world.pending entries must be commitment objects")
+
+    kind = str(c.get("kind", "pact"))
+    if kind not in COMMIT_KINDS:
+        kind = "pact"
+    axis = c.get("axis")
+
+    out = {
+        "uid":      int(c.get("uid", 0)),
+        "kind":     kind,
+        "a":        int(c.get("a", 0)),
+        "b":        int(c.get("b", 0)),
+        "axis":     axis if axis in ("X", "Y", "Z") else "Y",
+        "strength": float(c.get("strength", 0.5)),
+        "sworn":    int(c.get("sworn", 1)),
+        "matures":  int(c.get("matures", 2)),
+        "owner":    int(c.get("owner", 0)),
+        "pressure": [],
+    }
+
+    for f in ("a", "b", "owner"):
+        if not 0 <= out[f] < N:
+            raise ValueError(f"world.pending: {f}={out[f]} is not a kingdom")
+
+    for pr in (c.get("pressure") or []):
+        if not isinstance(pr, dict):
+            continue
+        _on = pr.get("on")
+        _ax = pr.get("axis")
+        # `on` is used directly as a qubit index in the rotations list, so
+        # it gets the same treatment as a and b above.
+        _on = None if _on is None else int(_on)
+        if _on is not None and not 0 <= _on < N:
+            raise ValueError(f"world.pending: pressure on={_on} is not a kingdom")
+        out["pressure"].append({
+            "by":     int(pr.get("by", 0)),
+            "axis":   _ax if _ax in ("X", "Y", "Z") else "Y",
+            "amount": float(pr.get("amount", 0.0)),
+            "on":     _on,
+        })
+
+    return out
+
+
 def world_import(d):
     """Load a world sent by the client. Returns True if it took one.
 
@@ -707,7 +802,10 @@ def world_import(d):
     _lev  = _grid(d.get("lev",  [[0.0] * N for _ in range(N)]), "lev")
     _deb  = _grid(d.get("deb",  [[0.0] * N for _ in range(N)]), "deb")
 
-    _pending   = copy.deepcopy(d.get("pending", [])) or []
+    _raw_pending = d.get("pending") or []
+    if not isinstance(_raw_pending, list):
+        raise ValueError("world.pending must be an array")
+    _pending   = [_commit_clean(c) for c in _raw_pending]
     _next_uid  = int(d.get("next_uid", 1))
     _known     = copy.deepcopy(d.get("known", [None] * N)) or [None] * N
     _last_seen = [int(v) for v in d.get("last_seen", [0] * N)]
@@ -718,13 +816,6 @@ def world_import(d):
         raise ValueError(f"world.known must have {N} entries")
     if len(_last_seen) != N:
         raise ValueError(f"world.last_seen must have {N} entries")
-    if not isinstance(_pending, list):
-        raise ValueError("world.pending must be an array")
-    for c in _pending:
-        if not isinstance(c, dict) or "uid" not in c:
-            raise ValueError("world.pending entries must be commitment objects")
-        c.setdefault("pressure", [])
-
     # nothing below here can fail, so the module state is never half-loaded
     mood, bond, lev, deb = _mood, _bond, _lev, _deb
     pending, next_uid = _pending, _next_uid
