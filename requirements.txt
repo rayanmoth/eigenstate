@@ -1,13 +1,21 @@
-# Vercel installs this at build time. Measured unzipped footprint of this
-# set is around 250 MB against a 500 MB Python limit, so there is headroom
-# but not a lot -- do not add anything casually.
+# Vercel installs this at build time.
 flask
 qiskit
 qiskit-aer
 requests
 
-# NOT listed on purpose: qiskit-ibm-runtime and qiskit-experiments.
-# MothQuantumGraph is API-identical to QuantumGraph and needs neither, and
-# it is first on sys.path so it wins. If the build fails on an import from
-# inside quantumgraph, add them here -- but check the size first, because
-# qiskit-ibm-runtime is not small.
+# NOT optional, despite what QuantumGraph's own requirements.txt says.
+# QuantumGraph imports qiskit_ibm_runtime at MODULE level while omitting it
+# from its dependencies, so importing quantumgraph fails without it. This
+# was invisible locally because quantumfaction-env has it installed;
+# deployment is the first environment that did not.
+#
+# Nothing in Eigenstate uses IBM's runtime -- the backend is quantumgraph's
+# own ExpectationValue (exact, local) or Moth's HTTP API. This is here
+# purely to satisfy an import.
+qiskit-ibm-runtime
+
+# Same story if the traceback moves on to this one. Left commented because
+# the bundle was already 249.85 MB and every package counts; uncomment only
+# if the log names it.
+# qiskit-experiments
