@@ -60,16 +60,13 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-# Sourced so it does NOT clobber anything already set in the environment,
-# because `EIGENSTATE_HW_SCOPE=world ./start_server.sh` silently losing to a
-# stale line in this file is a bad twenty minutes.
-if [ -f moth.env ]; then
-    while IFS='=' read -r k v; do
-        case "$k" in ''|\#*) continue ;; esac
-        eval "cur=\${$k:-}"
-        [ -z "$cur" ] && export "$k=$v"
-    done < moth.env
-fi
+# Credentials and mode, if present. Never printed.
+# Sourced here, then anything already in the environment is put back, so
+# `EIGENSTATE_HW_SCOPE=world ./start_server.sh` wins over a stale line in the
+# file. It used to be the other way round, which cost an afternoon.
+_scope_cli="${EIGENSTATE_HW_SCOPE:-}"
+[ -f moth.env ] && . ./moth.env
+[ -n "$_scope_cli" ] && export EIGENSTATE_HW_SCOPE="$_scope_cli"
 
 say "starting $SERVER with $PY"
 nohup "$PY" "$SERVER" > "$LOG" 2>&1 &

@@ -365,8 +365,14 @@ S.hw_enabled = True
 S.hw_scope = "world"
 
 calls["n"] = 0
-st, ng = post("/newgame", {})
+st, ng0 = post("/newgame", {})
 check("/newgame with scope=world 200", st == 200, st)
+check("/newgame spends NO round trip", calls["n"] == 0, calls["n"])
+
+# the engine read happens on a turn, where the player chose to wait
+calls["n"] = 0
+st, ng = post("/turn", {"world": ng0["world"], "year": 2, "events": []})
+check("/turn with scope=world 200", st == 200, st)
 check("the engine was called exactly once", calls["n"] == 1, calls["n"])
 
 _f1 = ng["factions"][1]

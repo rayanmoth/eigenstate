@@ -737,7 +737,18 @@ def _grid(src, name):
     return out
 
 
-WORLD_SHOTS = int(os.environ.get("EIGENSTATE_WORLD_SHOTS", "256"))
+# ONE SHOT, not 256. The tomography graph-v1 returns is computed exactly --
+# the probe came back with values like 3.4e-16, which no sampled estimator
+# produces -- so shots only affect the measurements histogram, which the world
+# read does not use. Paying for 256 of them bought nothing but latency.
+WORLD_SHOTS = int(os.environ.get("EIGENSTATE_WORLD_SHOTS", "1"))
+
+# Read the world off the engine every Nth month rather than every month. 1 is
+# every month; 2 halves the round trips for numbers that move slowly anyway.
+# The months in between show the local simulation, which agrees to within a
+# few percent -- so this is a real honesty/latency dial and the gate log always
+# says which kind of month you are looking at.
+WORLD_EVERY = max(1, int(os.environ.get("EIGENSTATE_WORLD_EVERY", "1")))
 
 
 def sync_world_from_engine():
@@ -766,6 +777,12 @@ def sync_world_from_engine():
 
     if not want_hardware("world"):
         engine_view = None
+        return None
+
+    if WORLD_EVERY > 1 and (current_year % WORLD_EVERY) != 0:
+        engine_view = None
+        log_gate(f"month {current_year}: local read "
+                 f"(engine every {WORLD_EVERY} months)")
         return None
 
     try:
@@ -1601,7 +1618,12 @@ def newgame():
             for i in range(N):
                 traits[i] += bits[i]
 
-        sync_world_from_engine()
+        # DELIBERATELY NOT synced here. Month 1's world is all zeros and
+        # near-zeros, so an engine read shows the player nothing they could
+        # not guess -- and /newgame is the worst moment in the game to spend a
+        # round trip, because it is the one the player waits on at the letter
+        # screen with nothing else happening. From month 2 the numbers matter
+        # and the wait is inside a turn they chose to take.
         factions, pairs = read_state()
         for i in range(N):
             last_seen[i] = 1          # you begin the game briefed
