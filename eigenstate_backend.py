@@ -159,7 +159,14 @@ def hw_mode():
     env = os.environ.get("EIGENSTATE_HARDWARE", "").strip().lower()
     if env:
         return env
-    return "moth" if _runtime["token"] else "off"
+    # token_present(), not _runtime["token"] directly. _runtime is only populated by a
+    # POST to /credentials, which is how a local session does it -- so on a
+    # deployment where MOTH_API_TOKEN is an environment variable and nothing
+    # ever posts credentials, this used to report "off" with a perfectly good
+    # token sitting right there. moth_token() already falls back to the
+    # environment already; this just stops the two disagreeing about
+    # whether a token exists.
+    return "moth" if token_present() else "off"
 
 
 def n_qubits():
@@ -327,10 +334,15 @@ class GraphEngine:
                                f"{json.dumps(sub)[:300]}")
 
         deadline = time.time() + self.timeout
-        delay = 0.4                     # first poll fast: emu often finishes
-        while time.time() < deadline:   # before a 1s sleep would even end
+        # POLLING PACE. Measured on the real API: a completed oath took 9.7s
+        # wall but only 4.4s of actual HTTP, so more than half the wait was
+        # this loop sleeping past a job that had already finished. First poll
+        # fast because emu often finishes inside a second, and cap the backoff
+        # at 2s so the worst-case overshoot is 2s rather than 5.
+        delay = 0.35
+        while time.time() < deadline:
             time.sleep(delay)
-            delay = min(delay * 1.5, 5.0)
+            delay = min(delay * 1.5, 2.0)
             st = self._req(f"/api/v1/jobs/{job}/status")
             s = str(st.get("status", "")).lower()
             if s in self.BAD:
