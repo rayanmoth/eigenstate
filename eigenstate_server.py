@@ -145,6 +145,31 @@ app = Flask(__name__)
 lock = threading.Lock()
 
 
+@app.route("/", methods=["GET"])
+def _root():
+    """A front door. Hitting the bare domain in a browser used to return a
+    404, which looks broken to anyone who did not write this -- including
+    you, in a demo, with someone watching."""
+    return jsonify({
+        "service": "Eigenstate quantum brain",
+        "version": "clean-3",
+        "stateless": True,
+        "what": "The world state lives in the client. Every endpoint takes a "
+                "world and returns one, so this server remembers nothing "
+                "between requests and any number of players can share it.",
+        "endpoints": {
+            "GET  /health":  "liveness, version, backend",
+            "POST /newgame": "measure a new world into being",
+            "POST /turn":    "advance a month",
+            "POST /resolve": "measure battles and initiative",
+            "POST /scout":   "refresh intel on one court",
+            "POST /observe":  "full pairwise tomography",
+            "GET  /hardware": "what ran where",
+        },
+        "game": "GameMaker desktop client, not served from here",
+    })
+
+
 @app.errorhandler(404)
 def _no_route(e):
     """Say WHICH path we were handed, and what we would have accepted.
