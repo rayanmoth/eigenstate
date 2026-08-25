@@ -1,4 +1,4 @@
-# Eigenstate — the quantum brain
+# Eigenstate 
 
 The game is a GameMaker project. This folder is the server it talks to: five
 kingdoms held as five qubits, and outcomes decided by measuring them.
