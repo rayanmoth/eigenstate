@@ -42,18 +42,28 @@ BLOCK = """<!-- eigenstate-html5-patch -->
 
   /* GameMaker wraps the canvas in a div; neither should add layout of its own */
   #gm4html5_div_id, div[align="center"] {
-    display: contents;
+    display: contents !important;
+    width: auto !important;
+    height: auto !important;
   }
 
   /* Scale to whichever dimension runs out first, exact 16:9, no smoothing.
      640x360 is the game's GUI size. */
+  /* !important on every line, and this is not laziness.
+     GameMaker's runtime sets canvas.style.width and canvas.style.height in
+     JavaScript after the page loads, and an inline style beats a stylesheet
+     rule -- so the first version of this patch was silently overridden the
+     moment the game booted. An !important stylesheet rule is the one thing
+     that outranks an inline style. */
   canvas {
-    display: block;
-    width:  min(100vw, calc(100vh * 640 / 360));
-    height: min(100vh, calc(100vw * 360 / 640));
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;   /* older Firefox */
-    outline: none;
+    display: block !important;
+    position: static !important;
+    width:  min(100vw, calc(100vh * 640 / 360)) !important;
+    height: min(100vh, calc(100vw * 360 / 640)) !important;
+    max-width: none !important;
+    max-height: none !important;
+    image-rendering: pixelated !important;
+    outline: none !important;
   }
 
   #eg-full {
