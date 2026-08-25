@@ -1,5 +1,6 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "outputDirectory": "public",
   "functions": {
     "api/index.py": {
       "maxDuration": 300,
@@ -7,9 +8,6 @@
     }
   },
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index?__p=$1"
-    }
+    { "source": "/(credentials|hardware|health|newgame|observe|resolve|scout|timing|turn)", "destination": "/api/index?__p=$1" }
   ]
 }
