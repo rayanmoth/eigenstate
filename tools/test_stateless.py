@@ -444,6 +444,134 @@ check("the right key gets through", r.status_code == 200, r.status_code)
 S.CLIENT_KEY = ""
 
 
+print("\n=== 14. bring your own key ===")
+# The player supplies a Moth token per request. The deployment itself has
+# hardware OFF, which is the shipping configuration, so anything the engine
+# does here is proof the header alone turned it on.
+S.hw_enabled = False
+S.hw_scope = "off"
+S.graph_engine = lambda: _FakeEngine()
+S.BYO_KEYS = True
+
+_expect_byo = round(max(-1.0, min(1.0, -MARK_Z / S.MOOD_CEILING)), 3)
+
+
+def post_key(path, body, token=None):
+    h = {}
+    if token is not None:
+        h["X-Moth-Token"] = token
+    r = app.post(path, json=json.loads(json.dumps(gm(body))), headers=h)
+    return r.status_code, (r.get_json() or {})
+
+
+st, b0 = post_key("/newgame", {})
+check("/newgame with no key 200", st == 200, st)
+
+calls["n"] = 0
+st, b1 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []})
+check("no key means no engine call", calls["n"] == 0, calls["n"])
+check("and the numbers are local",
+      b1["factions"][1]["hostility"] != _expect_byo,
+      b1["factions"][1]["hostility"])
+
+calls["n"] = 0
+st, b2 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="pretend-player-token")
+check("a key in the header 200", st == 200, st)
+check("a key turns the engine on for that request", calls["n"] == 1, calls["n"])
+check("and the numbers came off the engine",
+      b2["factions"][1]["hostility"] == _expect_byo,
+      b2["factions"][1]["hostility"])
+
+# THE ONE THAT MATTERS: the token must not survive the response, or the next
+# player to hit this instance inherits the last player's credentials.
+from eigenstate_backend import token_value
+check("the token does not outlive the request",
+      token_value() is None, token_value())
+
+calls["n"] = 0
+st, b3 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []})
+check("the next keyless request is local again", calls["n"] == 0, calls["n"])
+
+# an empty or whitespace header is the same as no header
+calls["n"] = 0
+st, b4 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="   ")
+check("a blank key is treated as no key", calls["n"] == 0, calls["n"])
+
+# and the deployment can refuse to accept player keys at all
+S.BYO_KEYS = False
+calls["n"] = 0
+st, b5 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="pretend-player-token")
+check("BYO_KEYS=0 ignores the header entirely", calls["n"] == 0, calls["n"])
+S.BYO_KEYS = True
+
+check("/health advertises byo without echoing a key",
+      app.get("/health").get_json().get("byo_keys") is True
+      and "moth_token" not in app.get("/health").get_data(as_text=True))
+
+print("\n=== 15. a bad key falls back to local, and SAYS so ===")
+
+
+class _RefusingEngine(_FakeEngine):
+    def measure(self, *a, **k):
+        calls["n"] += 1
+        raise RuntimeError("HTTP Error 401: Unauthorized")
+
+
+S.graph_engine = lambda: _RefusingEngine()
+calls["n"] = 0
+st, r0 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="a-wrong-key")
+check("a refused key still returns 200", st == 200, st)
+check("the engine was tried once", calls["n"] == 1, calls["n"])
+check("the month was computed anyway", "factions" in r0)
+check("the numbers are local, not the engine's",
+      r0["factions"][1]["hostility"] != _expect_byo,
+      r0["factions"][1]["hostility"])
+_q = r0.get("quantum", {})
+check("engine_used says false", _q.get("engine_used") is False,
+      _q.get("engine_used"))
+check("and the note names the key as the problem",
+      "key" in (_q.get("engine_note") or "").lower(), _q.get("engine_note"))
+check("the note does not contain the key itself",
+      "a-wrong-key" not in json.dumps(r0), "leaked")
+
+
+class _SlowEngine(_FakeEngine):
+    def measure(self, *a, **k):
+        raise TimeoutError("the read timed out")
+
+
+S.graph_engine = lambda: _SlowEngine()
+st, r1 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="a-real-looking-key")
+check("a timeout also falls back", st == 200, st)
+check("and says so without blaming the key",
+      "time" in (r1["quantum"].get("engine_note") or "").lower(),
+      r1["quantum"].get("engine_note"))
+
+# a good key on a working engine says nothing, because there is nothing wrong
+S.graph_engine = lambda: _FakeEngine()
+st, r2 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []},
+                  token="a-good-key")
+check("a working engine reports used", r2["quantum"].get("engine_used") is True,
+      r2["quantum"].get("engine_used"))
+check("and has nothing to say", r2["quantum"].get("engine_note") == "",
+      r2["quantum"].get("engine_note"))
+
+# no key at all is not a failure and must not produce a warning
+st, r3 = post_key("/turn", {"world": b0["world"], "year": 2, "events": []})
+check("no key is silent, not an error",
+      r3["quantum"].get("engine_note") == ""
+      and r3["quantum"].get("engine_offered") is False,
+      r3["quantum"].get("engine_note"))
+
+S.graph_engine = _real_engine
+S.hw_enabled, S.hw_scope = _real_hw, _real_scope
+
+
 print(f"\n{'='*54}\n  {len(OK)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  failing:", ", ".join(FAIL))

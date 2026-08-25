@@ -45,7 +45,7 @@ def chk(name, cond, detail=""):
 print("=== A. the rewrite as configured ===")
 r = c.get("/api/index?__p=health")
 chk("200", r.status_code == 200, r.status_code)
-chk("reached /health", (r.get_json() or {}).get("version") == "clean-3",
+chk("reached /health", (r.get_json() or {}).get("version") == "clean-4",
     r.get_json())
 
 print("\n=== B. __p with a leading slash ===")

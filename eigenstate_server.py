@@ -65,7 +65,7 @@ correlation of -0.03. Everything below reports connected values.
 """
 
 import sys, os, math, threading, time, json, copy, traceback
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 
 # QuantumGraph is not on PyPI, so it ships in a folder next to this file.
 #
@@ -152,7 +152,7 @@ def _root():
     you, in a demo, with someone watching."""
     return jsonify({
         "service": "Eigenstate quantum brain",
-        "version": "clean-3",
+        "version": "clean-4",
         "stateless": True,
         "what": "The world state lives in the client. Every endpoint takes a "
                 "world and returns one, so this server remembers nothing "
@@ -191,7 +191,7 @@ def _no_route(e):
         "known_routes": sorted(
             r.rule for r in app.url_map.iter_rules()
             if not r.rule.startswith("/static")),
-        "version": "clean-3",
+        "version": "clean-4",
     }), 404
 
 
@@ -229,6 +229,69 @@ def _gate():
                     "detail": "this deployment requires X-Eigenstate-Key"}), 401
 
 
+# ============================================================
+# BRING YOUR OWN KEY
+#
+# A public deployment cannot hold a Moth token. The URL is the only thing a
+# stranger needs, so a server-side token means strangers spend Moth's quota.
+# So the PLAYER supplies one, and supplies it on EVERY request, because this
+# process is stateless and the next request may land on a different instance.
+#
+# The token is never written to disk, never logged, and never survives the
+# response. A player with no key gets the local simulation, which is the same
+# game with locally computed numbers.
+# ============================================================
+BYO_KEYS = os.environ.get("EIGENSTATE_BYO_KEYS", "1") not in ("0", "false", "no", "")
+
+# WHAT THE ENGINE DID THIS REQUEST, in words the player can read. The
+# fallback to the local simulation was always silent, which meant a player
+# with a typo in their key saw a working game and believed the numbers came
+# off the engine. Set by sync_world_from_engine and by the oath measurement,
+# reported in quantum_report, cleared at the start of every request.
+engine_used = False
+engine_note = ""
+
+
+def engine_fell_back(exc):
+    """Turn an engine failure into one sentence a player can act on."""
+    global engine_used, engine_note
+    engine_used = False
+    text = f"{type(exc).__name__}: {exc}"
+    if "401" in text or "403" in text or "Unauthor" in text:
+        engine_note = ("Moth refused that API key, so this month was "
+                       "computed locally. Check the key in settings.")
+    elif "429" in text:
+        engine_note = ("Moth is rate limiting that key, so this month was "
+                       "computed locally.")
+    elif "timed out" in text.lower() or "timeout" in text.lower():
+        engine_note = ("Moth did not answer in time, so this month was "
+                       "computed locally.")
+    else:
+        engine_note = ("The engine could not be reached, so this month was "
+                       "computed locally.")
+    return engine_note
+
+
+@app.before_request
+def _byo_token():
+    global engine_used, engine_note
+    engine_used, engine_note = False, ""
+    tok = (request.headers.get("X-Moth-Token") or "").strip() if BYO_KEYS else ""
+    g.moth_token = tok or None
+    if tok:
+        # set_credentials(remember=False) touches memory only.
+        set_credentials(tok)
+    return None
+
+
+@app.teardown_request
+def _drop_byo_token(exc=None):
+    # forget_file=False: this must never delete a local developer's saved
+    # credentials just because a request carried its own key.
+    if getattr(g, "moth_token", None):
+        clear_credentials(forget_file=False)
+
+
 @app.errorhandler(Exception)
 def _blew_up(e):
     """Hand the caller the traceback instead of Werkzeug's beige 500 page.
@@ -260,7 +323,7 @@ def _blew_up(e):
         "detail": str(e),
         "where": request.path,
         "traceback": tb.splitlines()[-14:],
-        "version": "clean-3",
+        "version": "clean-4",
     }), 500
 
 
@@ -285,7 +348,8 @@ def _cors(resp):
     """
     resp.headers["Access-Control-Allow-Origin"]  = os.environ.get(
         "EIGENSTATE_CORS_ORIGIN", "*")
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Eigenstate-Key"
+    resp.headers["Access-Control-Allow-Headers"] = ("Content-Type, X-Eigenstate-Key, "
+                                                   "X-Moth-Token")
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Max-Age"]       = "86400"
     return resp
@@ -372,6 +436,11 @@ def want_hardware(kind):
     lie about what was computed. Initiative is asked every single month and a
     round trip per turn is not a game.
     """
+    # A PLAYER-SUPPLIED KEY turns the engine on for that player's own
+    # requests, at world scope, whatever the deployment's own setting is.
+    # Their key, their quota, their call.
+    if getattr(g, "moth_token", None):
+        return kind in ("oath", "world")
     if not hw_enabled:
         return False
     if kind == "oath":
@@ -807,7 +876,7 @@ def sync_world_from_engine():
     must not cost the player their turn, so every failure path here ends in
     "carry on locally" plus a line in the gate log saying so.
     """
-    global engine_view
+    global engine_view, engine_used, engine_note
 
     if not want_hardware("world"):
         engine_view = None
@@ -824,14 +893,20 @@ def sync_world_from_engine():
     except Exception as e:
         engine_view = None
         log_gate(f"world read fell back to local ({type(e).__name__})")
+        log_gate(engine_fell_back(e))
         return None
 
     v = EngineView(meta.get("tomography"))
     if not v.ok():
         engine_view = None
+        engine_used = False
+        engine_note = ("The engine answered without tomography, so this "
+                       "month was computed locally.")
         log_gate("world read fell back to local (engine sent no tomography)")
         return None
 
+    engine_used = True
+    engine_note = ""
     engine_view = v
     log_gate(f"world measured on {graph_engine().where(meta)} "
              f"in {meta.get('wall_s')}s -- every number below is from there")
@@ -1250,6 +1325,11 @@ def quantum_report():
         "hw_scope": hw_scope,
         "hw_log": hw_log[-6:],
         "hw_budget": hw_budget_report(),
+        # WHAT ACTUALLY HAPPENED THIS MONTH, for the player rather than for
+        # the log. engine_note is empty whenever there is nothing to say.
+        "engine_used": engine_used,
+        "engine_note": engine_note,
+        "engine_offered": bool(getattr(g, "moth_token", None)),
     }
 
 
@@ -1548,6 +1628,7 @@ def commit_mature(c):
         except Exception as e:
             hw_log.append(f"oath #{c['uid']}: engine failed "
                           f"({type(e).__name__}: {e}), decided locally")
+            hw_log.append(engine_fell_back(e))
             oracle_meta = None
             bits = None
 
@@ -1879,7 +1960,7 @@ def health():
     importing qiskit."""
     return jsonify({
         "ok": True,
-        "version": "clean-3",
+        "version": "clean-4",
         # the client can feature-detect the stateless path
         "stateless": True,
         # Report the FILE, not just a string I have to remember to bump. A
@@ -1891,6 +1972,9 @@ def health():
         "hardware": hw_mode(),
         "hw_enabled": hw_enabled,
         "hw_scope": hw_scope,
+        # whether this deployment will accept a player's own key. The key
+        # itself is never echoed anywhere, masked or otherwise.
+        "byo_keys": BYO_KEYS,
     })
 
 
